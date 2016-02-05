@@ -1,0 +1,344 @@
+#!/usr/bin/python
+
+# Copyright 2015 Jason Edelman <jason@networktocode.com>
+# Network to Code, LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+DOCUMENTATION = '''
+---
+
+module: aci_filter_entry
+short_description: Manages filter entries that will be assigned to a filter
+description:
+    - Manages filter entries that will be assigned to an already created filter
+author: Jason Edelman (@jedelman8)
+requirements:
+    - ACI Fabric 1.0(3f)+
+    - Cobra SDK
+notes:
+  - If only a single source port is required (not to and from),
+    either the src_to_port or src_from_port could be used.
+  - If only a single dest port is required (not to and from),
+    either the dest_to_port or dest_from_port could be used.
+  - When neither *_to_port or *_from_port is not used, it becomes
+    unspecified (as in ACI fabric)
+  - If ACI supports named protocols, the module is not idempotent,
+    with the exception of http/https.
+  - Only a single tcp session rule is supported per entry
+  - If proto does not equal tcp/udp, the src/dest and tcp_session
+    params are not used, even if set.
+options:
+    name:
+        description:
+            - Name of the entry
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    filter:
+        description:
+            - Name of the filter this entry will be part of
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    tenant:
+        description:
+            - Name of the tenant this entry will be part of
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    proto:
+        description:
+            - Protocol to be matched against for this entry
+        required: false
+        default: null
+        choices: ['eigrp', 'egp', 'icmp', 'igmp', 'igp', 'l2tp', 'ospfigp',
+                  'pim', 'tcp', 'udp']
+        aliases: []
+    allow_fragment:
+        description:
+            - Matches allow_fragment option from APIC
+        required: false
+        default: null
+        choices: ['yes', 'no']
+        aliases: []
+    src_to_port:
+        description:
+            - supports keywords as APIC does, i.e. unspecified, https, http
+        required: false
+        default: unspecified
+        choices: []
+        aliases: []
+    src_from_port:
+        description:
+            - supports keywords as APIC does, i.e. unspecified, https, http
+        required: true
+        default: unspecified
+        choices: []
+        aliases: []
+    dest_to_port:
+        description:
+            - supports keywords as APIC does, i.e. unspecified, https, http
+        required: false
+        default: unspecified
+        choices: []
+        aliases: []
+    dest_from_port:
+        description:
+            - supports keywords as APIC does, i.e. unspecified, https, http
+        required: false
+        default: unspecified
+        choices: []
+        aliases: []
+    tcp_session_rules:
+        description:
+            - Acknowledgment, Synchronize, Established,
+              Reset, Finish
+        required: false
+        default: null
+        choices: ['ack', 'syn', 'est', 'rst', 'fin']
+        aliases: []
+    state:
+        description:
+            - Desired state of the entry
+        required: false
+        default: present
+        choices: ['present','absent']
+        aliases: []
+    host:
+        description:
+            - IP Address or hostname of APIC resolvable by Ansible control host
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    username:
+        description:
+            - Username used to login to the switch
+        required: true
+        default: 'admin'
+        choices: []
+        aliases: []
+    password:
+        description:
+            - Password used to login to the switch
+        required: true
+        default: 'C1sco12345'
+        choices: []
+        aliases: []
+    protocol:
+        description:
+            - Dictates connection protocol
+        required: false
+        default: https
+        choices: ['http', 'https']
+        aliases: []
+'''
+
+EXAMPLES = '''
+
+# entry for web filter
+- aci_filter_entry: name=web_filter proto=tcp tenant=ACILab filter=Web_Filter dest_to_port=80 state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+
+# entry showing varying src/dest ports
+- aci_filter_entry: name=entry2 proto=tcp tenant=ACILab filter=Web_Filter src_to_port=unspecified dest_from_port=500 dest_to_port=1000 tcp_session_rules=rst host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+
+'''
+import socket
+
+try:
+    HAS_COBRA = True
+    from cobra.mit.access import MoDirectory
+    from cobra.mit.session import LoginSession
+    from cobra.mit.request import ConfigRequest
+    from cobra.model.vz import Entry
+    from cobra.internal.codec.xmlcodec import toXMLStr
+except ImportError as ie:
+    HAS_COBRA = False
+
+
+KEY_MAP = {
+    'ether_type': 'etherT',
+    'allow_fragment': 'applyToFrag',
+    'proto': 'prot',
+    'src_to_port': 'sToPort',
+    'src_from_port': 'sFromPort',
+    'dest_to_port': 'dToPort',
+    'dest_from_port': 'dFromPort',
+    'tcp_session_rules': 'tcpRules'
+}
+
+VALUE_MAP = {
+    '80': 'http',
+    '443': 'https',
+}
+
+
+def check(usrinput):
+    return VALUE_MAP.get(usrinput, usrinput)
+
+
+def get_existing(moDir, tenant, name, filt):
+    existing = {}
+    entry_mo = moDir.lookupByDn('uni/tn-{0}/flt-{1}/e-{2}'.format(tenant,
+                                                                  filt, name))
+    if entry_mo:
+        for mine, cobra in KEY_MAP.iteritems():
+            value = getattr(entry_mo, cobra)
+            if value:
+                existing[mine] = value
+    return existing
+
+
+def main():
+
+    module = AnsibleModule(
+        argument_spec=dict(
+            name=dict(type='str', required=True),
+            filter=dict(type='str', required=True),
+            tenant=dict(type='str', required=True),
+            allow_fragment=dict(choices=['yes', 'no']),
+            proto=dict(choices=['eigrp', 'egp', 'icmp', 'igmp', 'igp',
+                                'l2tp', 'ospfigp', 'pim', 'tcp',
+                                'udp'], required=False),
+            src_to_port=dict(type='str', required=False,
+                             default='unspecified'),
+            src_from_port=dict(type='str', required=False,
+                               default='unspecified'),
+            dest_to_port=dict(type='str', required=False,
+                              default='unspecified'),
+            dest_from_port=dict(type='str', required=False,
+                                default='unspecified'),
+            tcp_session_rules=dict(choices=['ack', 'syn', 'est', 'rst', 'fin'],
+                                   required=False),
+            state=dict(choices=['present', 'absent'], default='present'),
+            host=dict(required=True),
+            username=dict(type='str', default='admin'),
+            password=dict(type='str', default='C1sco12345'),
+            protocol=dict(choices=['http', 'https'], default='https')
+        ),
+        supports_check_mode=True
+    )
+    if not HAS_COBRA:
+        module.fail_json(msg='Ensure you have the ACI Cobra SDK installed',
+                         error=str(ie))
+
+    username = module.params['username']
+    password = module.params['password']
+    protocol = module.params['protocol']
+    host = socket.gethostbyname(module.params['host'])
+
+    state = module.params['state'].lower()
+
+    name = module.params['name']
+    tenant = module.params['tenant']
+    filt = module.params['filter']
+    allow_fragment = module.params['allow_fragment']
+    proto = module.params['proto']
+    src_to_port = check(module.params['src_to_port'])
+    src_from_port = check(module.params['src_from_port'])
+    dest_to_port = check(module.params['dest_to_port'])
+    dest_from_port = check(module.params['dest_from_port'])
+    tcp_session_rules = module.params['tcp_session_rules']
+
+    apic = '{0}://{1}/'.format(protocol, host)
+
+    session = LoginSession(apic, username, password)
+    moDir = MoDirectory(session)
+    moDir.login()
+
+    filter_mo = moDir.lookupByDn('uni/tn-{0}/flt-{1}'.format(tenant, filt))
+
+    if not filter_mo:
+        print module.fail_json(
+            msg='filter and tenant needs to be created first')
+
+    if state == 'present':
+        if not proto:
+            module.fail_json(msg='proto param is required')
+
+    if proto in ['eigrp', 'egp', 'icmp', 'igmp', 'igp',
+                 'l2tp', 'ospfigp', 'pim']:
+        src_to_port = None
+        src_from_port = None
+        dest_to_port = None
+        dest_from_port = None
+        tcp_session_rules = None
+
+    if proto in ['tcp', 'udp'] and allow_fragment:
+        allow_fragment = None
+    if src_from_port != 'unspecified' and src_to_port == 'unspecified':
+        src_to_port = src_from_port
+    elif src_to_port != 'unspecified' and src_from_port == 'unspecified':
+        src_from_port = src_to_port
+    if dest_from_port != 'unspecified' and dest_to_port == 'unspecified':
+        dest_to_port = dest_from_port
+    elif dest_to_port != 'unspecified' and dest_from_port == 'unspecified':
+        dest_from_port = dest_to_port
+
+    args = dict(ether_type='ip',
+                allow_fragment=allow_fragment, proto=proto,
+                src_to_port=src_to_port, src_from_port=src_from_port,
+                dest_to_port=dest_to_port, dest_from_port=dest_from_port,
+                tcp_session_rules=tcp_session_rules)
+
+    proposed = dict((k, v) for k, v in args.iteritems() if v is not None)
+
+    existing = get_existing(moDir, tenant, name, filt)
+
+    delta = dict(set(proposed.iteritems()).difference(existing.iteritems()))
+
+    new_entry_mo = None
+    if state == 'present':
+        if delta or not existing:
+            entry_args = {}
+            for key, value in KEY_MAP.iteritems():
+                config_value = delta.get(key, existing.get(key, None))
+                if config_value:
+                    entry_args[value] = config_value
+
+            new_entry_mo = Entry(filter_mo, name=name, **entry_args)
+
+    elif state == 'absent':
+        if existing:
+            new_entry_mo = Entry(filter_mo, name=name)
+            new_entry_mo.delete()
+
+    changed = False
+    results = {}
+    xmldoc = ''
+    if new_entry_mo:
+        xmldoc = toXMLStr(new_entry_mo)
+        if module.check_mode:
+            module.exit_json(changed=True, xmldoc=xmldoc)
+        else:
+            changed = True
+            config_req = ConfigRequest()
+            config_req.addMo(new_entry_mo)
+            moDir.commit(config_req)
+            results['new'] = get_existing(moDir, tenant, name, filt)
+
+    results['proposed'] = proposed
+    results['existing'] = existing
+    results['state'] = state
+    results['xmldoc'] = xmldoc
+    results['changed'] = changed
+
+    module.exit_json(**results)
+
+from ansible.module_utils.basic import *
+main()
+

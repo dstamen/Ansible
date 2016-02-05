@@ -1,0 +1,7 @@
+
+10.10.10.10                     # single APIC in system- can also use IP if no DNS or /etc/hosts isn't setup
+
+
+[all:vars]
+user = 'admin'
+pass = 'password'

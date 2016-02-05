@@ -1,0 +1,24 @@
+---
+
+- name: playbook to create HorizonViewPorts-FIL
+  hosts: apic
+  connection: local
+  gather_facts: no
+
+  tasks:
+      # ensure filters exist
+      - aci_filter: name={{ item }} tenant=common host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+        with_items:
+        - HorizonViewPorts
+
+      # ensure filter entries exist
+      - aci_filter_entry: name=HighEndPorts-tcp proto=tcp tenant=common filter=HorizonViewPorts-FIL dest_from_port=40000 dest_to_port=65000 state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+      - aci_filter_entry: name=HighEndPorts-udp proto=udp tenant=common filter=HorizonViewPorts-FIL dest_from_port=40000 dest_to_port=65000 state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+      - aci_filter_entry: name=HTML-Access proto=tcp tenant=common filter=HorizonViewPorts-FIL dest_from_port=22443 dest_to_port=22443 state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+      - aci_filter_entry: name=http proto=tcp tenant=common filter=HorizonViewPorts-FIL dest_from_port=http dest_to_port=http state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+      - aci_filter_entry: name=https proto=tcp tenant=common filter=HorizonViewPorts-FIL dest_from_port=https dest_to_port=https state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+      - aci_filter_entry: name=JMS proto=tcp tenant=common filter=HorizonViewPorts-FIL dest_from_port=4001 dest_to_port=4002 state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+      - aci_filter_entry: name=MMR proto=tcp tenant=common filter=HorizonViewPorts-FIL dest_from_port=9427 dest_to_port=9427 state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+      - aci_filter_entry: name=PCoIP proto=tcp tenant=common filter=HorizonViewPorts-FIL dest_from_port=4172 dest_to_port=4172 state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+      - aci_filter_entry: name=PCoIP-udp proto=udp tenant=common filter=HorizonViewPorts-FIL dest_from_port=4172 dest_to_port=4172 state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+      - aci_filter_entry: name=USB proto=tcp tenant=common filter=HorizonViewPorts-FIL dest_from_port=32111 dest_to_port=32111 state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}

@@ -1,0 +1,454 @@
+#!/usr/bin/python
+
+# Copyright 2015 Jason Edelman <jason@networktocode.com>
+# Network to Code, LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+DOCUMENTATION = '''
+---
+
+module: aci_epg
+short_description: Manages ACI end point groups and related contracts
+description:
+    - Manages ACI end point groups and related contracts
+author: Jason Edelman (@jedelman8)
+requirements:
+    - ACI Fabric 1.0(3f)+
+    - Cobra SDK
+notes:
+    - provided_contracts, consumed_contracts, vmm_domain, and bridge_domain
+      could be supplied as a string or a list of names for that particular
+      resource.  They also ensure each are in the desired state.
+      This means if resources are already assigned and not in the new list
+      (or str), they will be removed.
+options:
+    name:
+        description:
+            - Name of the application network profile
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    descr:
+        description:
+            - description of the application network profile
+        required: false
+        default: null
+        choices: []
+        aliases: []
+    tenant:
+        description:
+            - name of tenant this application network profile will be part of
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    anp:
+        description:
+            - name of the application profile this will be part of
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    prio:
+        description:
+            - priority (qos class) for epg
+        required: false
+        default: null
+        choices: ['unspecified', 'level1', 'level2', 'level3']
+        aliases: []
+    provided_contracts:
+        description:
+            - desired contract or list of provided contracts
+        required: false
+        default: null
+        choices: []
+        aliases: []
+    consumed_contracts:
+        description:
+            - desired contract or list of consumed contracts
+        required: false
+        default: null
+        choices: []
+        aliases: []
+    bridge_domain:
+        description:
+            - desired bridge domain or list of bridge domains
+        required: false
+        default: null
+        choices: []
+        aliases: []
+    vmm_domain:
+        description:
+            - desired vmm domain or list of vmm domains (VMware only)
+        required: false
+        default: null
+        choices: []
+        aliases: []
+    state:
+        description:
+            - Desired state of the epg
+        required: false
+        default: present
+        choices: ['present','absent']
+        aliases: []
+    host:
+        description:
+            - IP Address or hostname of APIC resolvable by Ansible control host
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    username:
+        description:
+            - Username used to login to the switch
+        required: true
+        default: 'admin'
+        choices: []
+        aliases: []
+    password:
+        description:
+            - Password used to login to the switch
+        required: true
+        default: 'C1sco12345'
+        choices: []
+        aliases: []
+    protocol:
+        description:
+            - Dictates connection protocol to use
+        required: false
+        default: https
+        choices: ['http', 'https']
+        aliases: []
+'''
+
+EXAMPLES = '''
+
+# ensure web epg exists
+- aci_epg:
+    name: Web_EPG
+    consumed_contracts: Web_Con
+    provided_contracts: App_Con
+    bridge_domain: ACILab_BD1
+    vmm_domain: My-vCenter
+    anp: 3Tier_App
+    tenant: ACILab
+    state: present
+    host: "{{ inventory_hostname }}"
+
+# ensure app epg exists
+- aci_epg:
+    name: App_EPG
+    consumed_contracts: App_Con
+    provided_contracts: DB_Con
+    bridge_domain: ACILab_BD1
+    vmm_domain: My-vCenter
+    anp: 3Tier_App
+    tenant: ACILab
+    state: present
+    host: "{{ inventory_hostname }}"
+
+'''
+import socket
+
+try:
+    HAS_COBRA = True
+    from cobra.mit.access import MoDirectory
+    from cobra.mit.session import LoginSession
+    from cobra.mit.request import ConfigRequest
+    from cobra.mit.request import DnQuery
+    from cobra.model.fv import AEPg, RsCons, RsProv, RsBd, RsDomAtt
+    from cobra.internal.codec.xmlcodec import toXMLStr
+except ImportError as ie:
+    HAS_COBRA = False
+
+
+def get_existing(moDir, tenant, anp, name):
+    existing = {}
+    uri = 'uni/tn-{0}/ap-{1}/epg-{2}'
+    mo = moDir.lookupByDn(uri.format(tenant, anp, name))
+    if mo:
+        existing = dict(name=name, prio=mo.prio, descr=mo.descr)
+    return existing
+
+
+def get_epg_contracts(moDir, tenant, anp, name, contype):
+    uri = 'uni/tn-{0}/ap-{1}/epg-{2}'
+    dnq = DnQuery(uri.format(tenant, anp, name))
+    dnq.queryTarget = 'children'
+    dnq.classFilter = contype
+    contracts = moDir.query(dnq)
+    names = [each.tnVzBrCPName for each in contracts if each]
+    return names
+
+
+def get_bdomains(moDir, tenant, anp, name):
+    uri = 'uni/tn-{0}/ap-{1}/epg-{2}'
+    dnq = DnQuery(uri.format(tenant, anp, name))
+    dnq.queryTarget = 'children'
+    dnq.classFilter = 'fvRsBd'
+    bds = moDir.query(dnq)
+    names = [each.tnFvBDName for each in bds if each]
+    return names
+
+
+def get_vmm_domains(moDir, tenant, anp, name):
+    uri = 'uni/tn-{0}/ap-{1}/epg-{2}'
+    dnq = DnQuery(uri.format(tenant, anp, name))
+    dnq.queryTarget = 'children'
+    dnq.classFilter = 'fvRsDomAtt'
+    vmms = moDir.query(dnq)
+    names = [str(each.tDn).split('dom-')[-1] for each in vmms if each]
+    return names
+
+
+def query_for_contracts(moDir, tenant):
+    uri = 'uni/tn-{0}'
+    dnq = DnQuery(uri.format(tenant))
+    dnq.queryTarget = 'children'
+    dnq.classFilter = 'vzBrCP'
+    contracts = moDir.query(dnq)
+    con_names = [each.name for each in contracts if each]
+    return con_names
+
+
+def get_contracts(moDir, tenant):
+    tenants = ['common']
+    con_names = []
+    cons = []
+    tenants.append(tenant)
+    for each in tenants:
+        con_names.append(query_for_contracts(moDir, each))
+    for tenant_cons in con_names:
+        for each in tenant_cons:
+            cons.append(each)
+    return cons
+
+
+def normalize_to_list(data):
+    if isinstance(data, str) or isinstance(data, unicode):
+        return [data]
+    elif data:
+        return data
+    else:
+        return []
+
+
+def get_existing_objects(moDir, tenant, anp, name):
+
+    consumed_contracts = get_epg_contracts(moDir, tenant, anp, name,
+                                           'fvRsCons')
+    provided_contracts = get_epg_contracts(moDir, tenant, anp, name,
+                                           'fvRsProv')
+    bridge_domain = get_bdomains(moDir, tenant, anp, name)
+    vmm_domain = get_vmm_domains(moDir, tenant, anp, name)
+    objdict = dict(consumed_contracts=consumed_contracts,
+                   provided_contracts=provided_contracts,
+                   bridge_domain=bridge_domain,
+                   vmm_domain=vmm_domain)
+    return objdict
+
+
+def assemble(existing_objects, existing, moDir, tenant, anp, name):
+    objs = {}
+    if existing_objects:
+        objs.update(existing_objects)
+    else:
+        objs.update(get_existing_objects(moDir, tenant, anp, name))
+    if existing:
+        objs.update(existing)
+    else:
+        get_existing(moDir, tenant, anp, name)
+    return objs
+
+
+def get_delta_objects(proposed_objects, existing_objects):
+
+    delta = {}
+    remove = {}
+    for object_type, lists in proposed_objects.iteritems():
+        delta[object_type] = existing_objects.get(
+            object_type) == proposed_objects.get(object_type)
+        remove[object_type] = list(set(
+            existing_objects.get(object_type)).difference(
+            proposed_objects.get(object_type)))
+    return delta, remove
+
+
+def build_object(object_type, resource_mo, each):
+    if object_type == 'consumed_contracts':
+        RsCons(resource_mo, tnVzBrCPName=each)
+    elif object_type == 'provided_contracts':
+        RsProv(resource_mo, tnVzBrCPName=each)
+    elif object_type == 'bridge_domain':
+        RsBd(resource_mo, tnFvBDName=each)
+    elif object_type == 'vmm_domain':
+        RsDomAtt(
+            resource_mo, tDn='uni/vmmp-VMware/dom-{0}'.format(
+                each))
+
+
+def remove_object(object_type, resource_mo, each):
+    if object_type == 'consumed_contracts':
+        obj = RsCons(resource_mo, tnVzBrCPName=each)
+    elif object_type == 'provided_contracts':
+        obj = RsProv(resource_mo, tnVzBrCPName=each)
+    elif object_type == 'bridge_domain':
+        obj = RsBd(resource_mo, tnFvBDName=each)
+    elif object_type == 'vmm_domain':
+        obj = RsDomAtt(
+               resource_mo, tDn='uni/vmmp-VMware/dom-{0}'.format(
+                each))
+    obj.delete()
+
+
+def main():
+
+    module = AnsibleModule(
+        argument_spec=dict(
+            name=dict(type='str', required=True),
+            tenant=dict(type='str', required=True),
+            anp=dict(type='str', required=True),
+            descr=dict(type='str'),
+            prio=dict(choices=['unspecified', 'level1', 'level2', 'level3']),
+            consumed_contracts=dict(),
+            provided_contracts=dict(),
+            bridge_domain=dict(),
+            vmm_domain=dict(),
+            state=dict(choices=['present', 'absent'], default='present'),
+            host=dict(required=True),
+            username=dict(type='str', default='admin'),
+            password=dict(type='str', default='C1sco12345'),
+            protocol=dict(choices=['http', 'https'], default='https')
+        ),
+        supports_check_mode=True
+    )
+    if not HAS_COBRA:
+        module.fail_json(msg='Ensure you have the ACI Cobra SDK installed',
+                         error=str(ie))
+
+    username = module.params['username']
+    password = module.params['password']
+    protocol = module.params['protocol']
+    host = socket.gethostbyname(module.params['host'])
+
+    state = module.params['state'].lower()
+
+    name = module.params['name']
+    tenant = module.params['tenant']
+    anp = module.params['anp']
+    descr = module.params['descr']
+    prio = module.params['prio']
+    consumed_contracts = normalize_to_list(module.params['consumed_contracts'])
+    provided_contracts = normalize_to_list(module.params['provided_contracts'])
+    bridge_domain = normalize_to_list(module.params['bridge_domain'])
+    vmm_domain = normalize_to_list(module.params['vmm_domain'])
+
+    apic = '{0}://{1}/'.format(protocol, host)
+
+    session = LoginSession(apic, username, password)
+    moDir = MoDirectory(session)
+    moDir.login()
+
+    tenant_mo = moDir.lookupByDn('uni/tn-{0}'.format(tenant))
+    if not tenant_mo:
+        print module.fail_json(msg='tenant needs to be created first')
+
+    anp_mo = moDir.lookupByDn('uni/tn-{0}/ap-{1}'.format(tenant, anp))
+    if not anp_mo:
+        print module.fail_json(msg='application network profile needs to'
+                               + ' be created first')
+
+    existing_tenant_contracts = get_contracts(moDir, tenant)
+
+    proposed_contracts = list(set(consumed_contracts).union(
+        provided_contracts))
+    for each in proposed_contracts:
+        if each not in existing_tenant_contracts:
+            module.fail_json(msg='contract does not exist', contract=each)
+
+    existing = get_existing(moDir, tenant, anp, name)
+
+    args = dict(descr=descr, prio=prio)
+
+    proposed = dict((k, v) for k, v in args.iteritems() if v is not None)
+    delta = dict(set(proposed.iteritems()).difference(existing.iteritems()))
+
+    existing_objects = get_existing_objects(moDir, tenant, anp, name)
+
+    all_existing = assemble(existing_objects, existing, moDir,
+                            tenant, anp, name)
+
+    proposed_objects = dict(consumed_contracts=consumed_contracts,
+                            provided_contracts=provided_contracts,
+                            bridge_domain=bridge_domain,
+                            vmm_domain=vmm_domain)
+
+    delta_objects, remove_objects = get_delta_objects(proposed_objects,
+                                                      existing_objects)
+
+    delta_bools = delta_objects.values()
+    delta_for_lists = False
+    if False in delta_bools:
+        delta_for_lists = True
+
+    resource_mo = None
+
+    if state == 'present':
+        if delta or delta_for_lists:
+            resource_args = {}
+            for key, value in proposed.iteritems():
+                config_value = delta.get(key, existing.get(key, None))
+                if config_value:
+                    resource_args[key] = config_value
+            resource_mo = AEPg(anp_mo, name=name, **resource_args)
+            for object_type, bool_condition in delta_objects.iteritems():
+                if not bool_condition:
+                    for each in proposed_objects.get(object_type):
+                        build_object(object_type, resource_mo, each)
+            for object_type, lists in remove_objects.iteritems():
+                for each in lists:
+                    remove_object(object_type, resource_mo, each)
+
+    elif state == 'absent':
+        if existing:
+            resource_mo = AEPg(anp_mo, name=name)
+            resource_mo.delete()
+
+    changed = False
+    results = {}
+    xmldoc = ''
+    if resource_mo:
+        xmldoc = toXMLStr(resource_mo)
+        if module.check_mode:
+            module.exit_json(changed=True, xmldoc=xmldoc)
+        else:
+            changed = True
+            config_req = ConfigRequest()
+            config_req.addMo(resource_mo)
+            moDir.commit(config_req)
+            results['new'] = assemble(existing_objects, existing, moDir,
+                                      tenant, anp, name)
+
+    results['proposed'] = proposed
+    results['proposed_objects'] = proposed_objects
+    results['existing'] = all_existing
+    results['state'] = state
+    results['xmldoc'] = xmldoc
+    results['changed'] = changed
+
+    module.exit_json(**results)
+
+from ansible.module_utils.basic import *
+main()

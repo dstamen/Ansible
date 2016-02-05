@@ -1,0 +1,227 @@
+#!/usr/bin/python
+
+# Copyright 2015 Jason Edelman <jason@networktocode.com>
+# Network to Code, LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+DOCUMENTATION = '''
+---
+
+module: aci_context
+short_description: Manage private networks, contexts, in an ACI fabric
+description:
+    - Offers ability to manage private networks. Each context is a private
+      network associated to a tenant, i.e. VRF
+author: Jason Edelman (@jedelman8)
+requirements:
+    - ACI Fabric 1.0(3f)+
+    - Cobra SDK
+notes:
+    - Tenant must be exist prior to using this module
+options:
+    name:
+        description:
+            - Name of context (private network / VRF)
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    descr:
+        description:
+            - description of context (private network)
+        required: false
+        default: null
+        choices: []
+        aliases: []
+    tenant:
+        description:
+            - name of tenant the private network will be associated to
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    state:
+        description:
+            - Desired state of the context
+        required: false
+        default: present
+        choices: ['present', 'absent']
+        aliases: []
+    host:
+        description:
+            - IP Address or hostname of APIC resolvable by Ansible control host
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    username:
+        description:
+            - Username used to login to the switch
+        required: true
+        default: 'admin'
+        choices: []
+        aliases: []
+    password:
+        description:
+            - Password used to login to the switch
+        required: true
+        default: 'C1sco12345'
+        choices: []
+        aliases: []
+    protocol:
+        description:
+            - Dictates connection protocol to use
+        required: false
+        default: https
+        choices: ['http', 'https']
+        aliases: []
+'''
+
+EXAMPLES = '''
+# ensure context for tenant exists (private network)
+- aci_context: name=ACILab_VRF descr='ACILab VRF' tenant=ACILab host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+
+# ensure context for tenant exists (private network)
+- aci_context: name=ACILab_VRF tenant=ACILab state=absent host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+
+
+'''
+import socket
+
+try:
+    HAS_COBRA = True
+    from cobra.mit.access import MoDirectory
+    from cobra.mit.session import LoginSession
+    from cobra.mit.request import ConfigRequest
+    from cobra.model.fv import Tenant
+    from cobra.model.fv import Ctx
+    from cobra.internal.codec.xmlcodec import toXMLStr
+except ImportError as ie:
+    HAS_COBRA = False
+
+
+KEY_MAP = {
+    'descr': 'descr',
+    'name': 'name'
+}
+
+
+def get_attributes(keymap, mo):
+    resource = {}
+    if mo:
+        for mine, cobra in keymap.iteritems():
+            value = getattr(mo, cobra)
+            if value:
+                resource[mine] = value
+    return resource
+
+
+def get_existing(moDir, tenant, name):
+    mo = moDir.lookupByDn('uni/tn-{0}/ctx-{1}'.format(tenant, name))
+    return get_attributes(KEY_MAP, mo)
+
+
+def main():
+
+    module = AnsibleModule(
+        argument_spec=dict(
+            name=dict(type='str', required=True),
+            tenant=dict(type='str', required=True),
+            descr=dict(type='str'),
+            state=dict(choices=['present', 'absent'], default='present'),
+            host=dict(required=True),
+            username=dict(type='str', default='admin'),
+            password=dict(type='str', default='C1sco12345'),
+            protocol=dict(choices=['http', 'https'], default='https')
+        ),
+        supports_check_mode=True
+    )
+    if not HAS_COBRA:
+        module.fail_json(msg='Ensure you have the ACI Cobra SDK installed',
+                         error=str(ie))
+
+    username = module.params['username']
+    password = module.params['password']
+    protocol = module.params['protocol']
+    host = socket.gethostbyname(module.params['host'])
+
+    state = module.params['state'].lower()
+
+    name = module.params['name']
+    tenant = module.params['tenant']
+    descr = module.params['descr']
+
+    apic = '{0}://{1}/'.format(protocol, host)
+
+    session = LoginSession(apic, username, password)
+    moDir = MoDirectory(session)
+    moDir.login()
+
+    uniMo = moDir.lookupByDn('uni')
+    tenant_filter = 'eq(fvTenant.name, "{0}" )'.format(tenant)
+    tenant_obj_list = moDir.lookupByClass('fvTenant', propFilter=tenant_filter)
+    ten = tenant_obj_list[0] if tenant_obj_list else None
+
+    if ten:
+        fvTenantMo = Tenant(uniMo, tenant)
+    else:
+        module.fail_json(msg='tenant needs to be created first.')
+
+    existing = get_existing(moDir, tenant, name)
+
+    proposed = dict(name=name, descr=descr)
+
+    delta = dict(set(proposed.iteritems()).difference(existing.iteritems()))
+
+    new_con_mo = None
+    if state == 'present':
+        if delta or not existing:
+            config_args = {}
+            for key, value in KEY_MAP.iteritems():
+                config_value = delta.get(key, existing.get(key, None))
+                if config_value:
+                    config_args[value] = config_value
+            if 'name' in config_args.keys():
+                config_args.pop('name')
+            new_con_mo = Ctx(fvTenantMo, name=name, **config_args)
+
+    elif state == 'absent':
+        if existing:
+            new_con_mo = Ctx(fvTenantMo, name=name)
+            new_con_mo.delete()
+
+    changed = False
+    results = {}
+    xmldoc = ''
+    if new_con_mo:
+        xmldoc = toXMLStr(new_con_mo)
+        if module.check_mode:
+            module.exit_json(changed=True, xmldoc=xmldoc)
+        else:
+            changed = True
+            config_req = ConfigRequest()
+            config_req.addMo(new_con_mo)
+            moDir.commit(config_req)
+            results['new'] = get_existing(moDir, tenant, name)
+
+    results['proposed'] = proposed
+    results['existing'] = existing
+    results['state'] = state
+    results['xmldoc'] = xmldoc
+    results['changed'] = changed
+
+    module.exit_json(**results)
+
+from ansible.module_utils.basic import *
+main()

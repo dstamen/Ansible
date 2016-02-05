@@ -1,0 +1,204 @@
+#!/usr/bin/python
+
+# Copyright 2015 Jason Edelman <jason@networktocode.com>
+# Network to Code, LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+DOCUMENTATION = '''
+---
+
+module: aci_filter
+short_description: Manages top level filter objects
+description:
+    - Manages top level filter objects, i.e. not each entry
+author: Jason Edelman (@jedelman8)
+requirements:
+    - ACI Fabric 1.0(3f)+
+    - Cobra SDK
+options:
+    name:
+        description:
+            - Name of the filter
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    descr:
+        description:
+            - description of filter
+        required: false
+        default: null
+        choices: []
+        aliases: []
+    tenant:
+        description:
+            - name of tenant this filter will be part of
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    state:
+        description:
+            - Desired state of the filter
+        required: false
+        default: present
+        choices: ['present','absent']
+        aliases: []
+    host:
+        description:
+            - IP Address or hostname of APIC resolvable by Ansible control host
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    username:
+        description:
+            - Username used to login to the switch
+        required: true
+        default: 'admin'
+        choices: []
+        aliases: []
+    password:
+        description:
+            - Password used to login to the switch
+        required: true
+        default: 'C1sco12345'
+        choices: []
+        aliases: []
+    protocol:
+        description:
+            - Dictates connection protocol to use
+        required: false
+        default: https
+        choices: ['http', 'https']
+        aliases: []
+'''
+
+EXAMPLES = '''
+
+# name: ensure filters exist
+aci_filter: name={{ item }} tenant=ACILab host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+with_items:
+  - Web_Filter
+  - App_Filter
+  - DB_Filter
+
+
+'''
+import socket
+
+try:
+    HAS_COBRA = True
+    from cobra.mit.access import MoDirectory
+    from cobra.mit.session import LoginSession
+    from cobra.mit.request import ConfigRequest
+    from cobra.model.vz import Filter
+    from cobra.internal.codec.xmlcodec import toXMLStr
+except ImportError as ie:
+    HAS_COBRA = False
+
+
+def get_existing(moDir, tenant, name):
+    existing = {}
+    filter_mo = moDir.lookupByDn('uni/tn-{0}/flt-{1}'.format(tenant, name))
+    if filter_mo:
+        existing = dict(name=name, descr=filter_mo.descr)
+    return existing
+
+
+def main():
+
+    module = AnsibleModule(
+        argument_spec=dict(
+            name=dict(type='str', required=True),
+            tenant=dict(type='str', required=True),
+            descr=dict(type='str'),
+            state=dict(choices=['present', 'absent'], default='present'),
+            host=dict(required=True),
+            username=dict(type='str', default='admin'),
+            password=dict(type='str', default='C1sco12345'),
+            protocol=dict(choices=['http', 'https'], default='https')
+        ),
+        supports_check_mode=True
+    )
+    if not HAS_COBRA:
+        module.fail_json(msg='Ensure you have the ACI Cobra SDK installed',
+                         error=str(ie))
+
+    username = module.params['username']
+    password = module.params['password']
+    protocol = module.params['protocol']
+    host = socket.gethostbyname(module.params['host'])
+
+    state = module.params['state'].lower()
+
+    name = module.params['name']
+    tenant = module.params['tenant']
+    descr = module.params['descr']
+
+    apic = '{0}://{1}/'.format(protocol, host)
+
+    session = LoginSession(apic, username, password)
+    moDir = MoDirectory(session)
+    moDir.login()
+
+    tenant_mo = moDir.lookupByDn('uni/tn-{0}'.format(tenant))
+    if not tenant_mo:
+        print module.fail_json(msg='tenant needs to be created first')
+
+    existing = get_existing(moDir, tenant, name)
+
+    args = dict(descr=descr)
+
+    proposed = dict((k, v) for k, v in args.iteritems() if v is not None)
+
+    delta = dict(set(proposed.iteritems()).difference(existing.iteritems()))
+
+    new_filter_mo = None
+    if state == 'present':
+        if delta or not existing:
+            filter_args = {}
+            for key, value in proposed.iteritems():
+                filter_args[key] = delta.get(key, None) or existing[key]
+            new_filter_mo = Filter(tenant_mo, name=name, **filter_args)
+
+    elif state == 'absent':
+        if existing:
+            new_filter_mo = Filter(tenant_mo, name=name)
+            new_filter_mo.delete()
+
+    changed = False
+    results = {}
+    xmldoc = ''
+    if new_filter_mo:
+        xmldoc = toXMLStr(new_filter_mo)
+        if module.check_mode:
+            module.exit_json(changed=True, xmldoc=xmldoc)
+        else:
+            changed = True
+            config_req = ConfigRequest()
+            config_req.addMo(new_filter_mo)
+            moDir.commit(config_req)
+            results['new'] = get_existing(moDir, tenant, name)
+
+    results['proposed'] = proposed
+    results['existing'] = existing
+    results['state'] = state
+    results['xmldoc'] = xmldoc
+    results['changed'] = changed
+
+    module.exit_json(**results)
+
+from ansible.module_utils.basic import *
+main()

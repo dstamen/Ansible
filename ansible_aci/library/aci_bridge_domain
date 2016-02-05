@@ -1,0 +1,287 @@
+#!/usr/bin/python
+
+# Copyright 2015 Jason Edelman <jason@networktocode.com>
+# Network to Code, LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+DOCUMENTATION = '''
+---
+
+module: aci_bridge_domain
+short_description: Manages bridge domains in an ACI fabric
+description:
+    - Manages bridge domains within an ACI fabric
+author: Jason Edelman (@jedelman8)
+requirements:
+    - ACI Fabric 1.0(3f)+
+    - Cobra SDK
+notes:
+    - Tenant and context must be exist prior to using this module
+    - One subnet can be added per task (per module call)
+    - state=absent removes complete bridge domain configuration including
+      all subnets
+options:
+    name:
+        description:
+            - Name of the bridge domain
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    descr:
+        description:
+            - description of bridge domain
+        required: false
+        default: null
+        choices: []
+        aliases: []
+    tenant:
+        description:
+            - name of tenant this bridge domain will be part of
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    subnet:
+        description:
+            - name of subnet that is paired to bridge domain
+        required: false
+        default: null
+        choices: []
+        aliases: []
+    context:
+        description:
+            - name of context (private network / VRF)
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    state:
+        description:
+            - Desired state of the bridge domain
+        required: false
+        default: present
+        choices: ['present','absent']
+        aliases: []
+    host:
+        description:
+            - IP Address or hostname of APIC resolvable by Ansible control host
+        required: true
+        default: null
+        choices: []
+        aliases: []
+    username:
+        description:
+            - Username used to login to the switch
+        required: true
+        default: 'admin'
+        choices: []
+        aliases: []
+    password:
+        description:
+            - Password used to login to the switch
+        required: true
+        default: 'C1sco12345'
+        choices: []
+        aliases: []
+    protocol:
+        description:
+            - Dictates connection protocol to use
+        required: false
+        default: https
+        choices: ['http', 'https']
+        aliases: []
+'''
+
+EXAMPLES = '''
+
+# ensure bridge domain 1 exists
+- aci_bridge_domain: name=ACILab_BD1 context=ACILab_VRF subnet=10.10.10.1/24 tenant=ACILab state=present host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+
+# ensure bd 1 doesn't exist
+- aci_bridge_domain: name=ACILab_BD1 context=ACILab_VRF tenant=ACILab state=absent host={{ inventory_hostname }} username={{ user }} password={{ pass }}
+
+'''
+
+import socket
+
+try:
+    HAS_COBRA = True
+    from cobra.mit.access import MoDirectory
+    from cobra.mit.session import LoginSession
+    from cobra.mit.request import ConfigRequest
+    from cobra.model.fv import BD
+    from cobra.model.fv import Subnet
+    from cobra.model.fv import RsCtx
+    from cobra.internal.codec.xmlcodec import toXMLStr
+except ImportError as ie:
+    HAS_COBRA = False
+
+
+BD_KEY_MAP = {
+    'descr': 'descr',
+    'name': 'name'
+}
+SUBNET_KEY_MAP = {
+    'subnet': 'ip'
+}
+
+
+def get_attributes(keymap, mo):
+    resource = {}
+    if mo:
+        for mine, cobra in keymap.iteritems():
+            value = getattr(mo, cobra)
+            if value:
+                resource[mine] = value
+    return resource
+
+
+def get_bd(moDir, tenant, name):
+    mo = moDir.lookupByDn('uni/tn-{0}/BD-{1}'.format(tenant, name))
+    return get_attributes(BD_KEY_MAP, mo)
+
+
+def get_subnet(moDir, tenant, name, subnet):
+    mo = moDir.lookupByDn('uni/tn-{0}/BD-{1}/subnet-[{2}]'.format(tenant,
+                                                                  name,
+                                                                  subnet))
+    return get_attributes(SUBNET_KEY_MAP, mo)
+
+
+def get_context(moDir, tenant, name):
+    con = moDir.lookupByDn('uni/tn-{0}/BD-{1}/rsctx'.format(tenant,
+                                                            name)).tnFvCtxName
+    return dict(context=con)
+
+
+def get_existing(moDir, tenant, name, subnet):
+    existing = {}
+    bd = get_bd(moDir, tenant, name)
+    if bd:
+        existing.update(bd)
+        if subnet:
+            sub = get_subnet(moDir, tenant, name, subnet)
+            existing.update(sub)
+        existing.update(get_context(moDir, tenant, name))
+
+    return existing
+
+
+def main():
+
+    module = AnsibleModule(
+        argument_spec=dict(
+            name=dict(type='str', required=True),
+            tenant=dict(type='str', required=True),
+            context=dict(type='str', required=True),
+            subnet=dict(type='str'),
+            descr=dict(type='str'),
+            state=dict(choices=['present', 'absent'], default='present'),
+            host=dict(required=True),
+            username=dict(type='str', default='admin'),
+            password=dict(type='str', default='C1sco12345'),
+            protocol=dict(choices=['http', 'https'], default='https')
+        ),
+        supports_check_mode=True
+    )
+    if not HAS_COBRA:
+        module.fail_json(msg='Ensure you have the ACI Cobra SDK installed',
+                         error=str(ie))
+
+    username = module.params['username']
+    password = module.params['password']
+    protocol = module.params['protocol']
+    host = socket.gethostbyname(module.params['host'])
+
+    state = module.params['state'].lower()
+
+    name = module.params['name']
+    tenant = module.params['tenant']
+    descr = module.params['descr']
+    context = module.params['context']
+    subnet = module.params['subnet']
+
+    apic = '{0}://{1}/'.format(protocol, host)
+
+    session = LoginSession(apic, username, password)
+    moDir = MoDirectory(session)
+    moDir.login()
+
+    tenant_mo = moDir.lookupByDn('uni/tn-{0}'.format(tenant))
+    if not tenant_mo:
+        print module.fail_json(msg='tenant needs to be created first')
+
+    context_mo = moDir.lookupByDn('uni/tn-{0}/ctx-{1}'.format(tenant, context))
+    if not context_mo:
+        print module.fail_json(msg='context needs to be created first')
+
+    existing = get_existing(moDir, tenant, name, subnet)
+
+    args = dict(name=name, descr=descr, subnet=subnet, context=context)
+
+    proposed = dict((k, v) for k, v in args.iteritems() if v is not None)
+
+    delta = dict(set(proposed.iteritems()).difference(existing.iteritems()))
+
+    new_mo = None
+    if state == 'present':
+        if delta or not existing:
+            config_args = {}
+            for key, value in BD_KEY_MAP.iteritems():
+                config_value = delta.get(key, existing.get(key, None))
+                if config_value:
+                    config_args[value] = config_value
+            if 'name' in config_args.keys():
+                config_args.pop('name')
+            new_mo = BD(tenant_mo, name=name, **config_args)
+            config_args.clear()
+            for key, value in SUBNET_KEY_MAP.iteritems():
+                config_value = delta.get(key, existing.get(key, None))
+                if config_value:
+                    config_args[value] = config_value
+            if config_args:
+                Subnet(new_mo, **config_args)
+            RsCtx(new_mo, tnFvCtxName=delta.get('context',
+                                                existing.get('context')))
+
+    elif state == 'absent':
+        if existing:
+            new_mo = BD(tenant_mo, name=name)
+            new_mo.delete()
+
+    changed = False
+    results = {}
+    xmldoc = ''
+    if new_mo:
+        xmldoc = toXMLStr(new_mo)
+        if module.check_mode:
+            module.exit_json(changed=True, xmldoc=xmldoc)
+        else:
+            changed = True
+            config_req = ConfigRequest()
+            config_req.addMo(new_mo)
+            moDir.commit(config_req)
+            results['new'] = get_existing(moDir, tenant, name, subnet)
+
+    results['proposed'] = proposed
+    results['existing'] = existing
+    results['state'] = state
+    results['xmldoc'] = xmldoc
+    results['changed'] = changed
+
+    module.exit_json(**results)
+
+from ansible.module_utils.basic import *
+main()

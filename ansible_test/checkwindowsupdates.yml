@@ -1,0 +1,5 @@
+- name: test raw module
+  hosts: test
+  tasks:
+    - name: run updates
+      win_updates: status=searched log_path=c:\ansible_wu.txt

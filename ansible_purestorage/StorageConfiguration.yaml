@@ -1,0 +1,43 @@
+- name: Configure Pure Storage Environment
+  hosts: localhost
+  collections:
+  - purestorage.flasharray
+  gather_facts: yes
+  vars:
+    fa_url: 192.168.1.10
+    fa_api_token: apitoken-000000
+  tasks:
+  - name: Create Volume
+    purefa_volume:
+      name: david-ansible-test
+      size: 10G
+      fa_url: "{{fa_url}}"
+      api_token: "{{fa_api_token}}"
+  - name: Create Host1
+    purefa_host:
+      host: "david-ansible-host1"
+      protocol: iscsi
+      iqn: "iqn.1998-01.com.vmware:david-ansible-host1"
+      fa_url: "{{fa_url}}"
+      api_token: "{{fa_api_token}}"
+  - name: Create Host2
+    purefa_host:
+      host: "david-ansible-host2"
+      protocol: iscsi
+      iqn: "iqn.1998-01.com.vmware:david-ansible-host2"
+      fa_url: "{{fa_url}}"
+      api_token: "{{fa_api_token}}"
+  - name: Create Hostgroup
+    purefa_hg:
+      hostgroup: david-ansible-hostgroup
+      fa_url: "{{fa_url}}"
+      api_token: "{{fa_api_token}}"
+  - name: Add hosts to hostgroup and connect volume
+    purefa_hg:
+      hostgroup: david-ansible-hostgroup
+      host:
+        - "david-ansible-host1"
+        - "david-ansible-host2"
+      volume: "david-ansible-test"
+      fa_url: "{{fa_url}}"
+      api_token: "{{fa_api_token}}"

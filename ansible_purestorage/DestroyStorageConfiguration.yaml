@@ -1,0 +1,48 @@
+- name: Destroy configured Pure Storage Environment
+  hosts: localhost
+  collections:
+  - purestorage.flasharray
+  gather_facts: yes
+  vars:
+    fa_url: 192.168.1.10
+    fa_api_token: apitoken-000000
+  tasks:
+  - name: Remove hosts from hostgroup and disconnect volume
+    purefa_hg:
+      hostgroup: david-ansible-hostgroup
+      host:
+        - "david-ansible-host1"
+        - "david-ansible-host2"
+      volume: "david-ansible-test"
+      fa_url: "{{fa_url}}"
+      api_token: "{{fa_api_token}}"
+      state: absent
+
+  - name: Remove Volume
+    purefa_volume:
+      name: david-ansible-test
+      fa_url: "{{fa_url}}"
+      api_token: "{{fa_api_token}}"
+      state: absent
+      eradicate: false
+
+  - name: Remove Host1
+    purefa_host:
+      host: "david-ansible-host1"
+      fa_url: "{{fa_url}}"
+      api_token: "{{fa_api_token}}"
+      state: absent
+
+  - name: Remove Host2
+    purefa_host:
+      host: "david-ansible-host2"
+      fa_url: "{{fa_url}}"
+      api_token: "{{fa_api_token}}"
+      state: absent
+
+  - name: Remove Hostgroup
+    purefa_hg:
+      hostgroup: david-ansible-hostgroup
+      fa_url: "{{fa_url}}"
+      api_token: "{{fa_api_token}}"
+      state: absent
